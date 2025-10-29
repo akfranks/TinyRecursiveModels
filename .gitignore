@@ -1,0 +1,10 @@
+models/recursive_reasoning/__pycache__/
+models/__pycache__/
+dataset/__pycache__/
+data/
+checkpoints/
+__pycache__/
+outputs/
+trm.venv/
+utils/__pycache__/
+wandb/
