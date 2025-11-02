@@ -16,7 +16,7 @@ import wandb
 import coolname
 import hydra
 import pydantic
-from omegaconf import DictConfig
+from omegaconf import OmegaConf, DictConfig
 from adam_atan2_pytorch import AdamAtan2 as AdamATan2
 
 from puzzle_dataset import PuzzleDataset, PuzzleDatasetConfig, PuzzleDatasetMetadata
@@ -509,7 +509,9 @@ def save_code_and_config(config: PretrainConfig):
     # Dump config as yaml
     config_file = os.path.join(config.checkpoint_path, "all_config.yaml")
     with open(config_file, "wt") as f:
-        yaml.dump(config.model_dump(), f)
+        config_dict = config.model_dump()
+        config_dict = OmegaConf.to_container(OmegaConf.create(config_dict), resolve=True)
+        yaml.dump(config_dict, f, default_flow_style=False)
 
     # Log code
     wandb.run.log_code(config.checkpoint_path)
@@ -592,7 +594,7 @@ def launch(hydra_config: DictConfig):
     ema_helper = None
     if RANK == 0:
         progress_bar = tqdm.tqdm(total=train_state.total_steps)
-        wandb.init(project=config.project_name, name=config.run_name, config=config.model_dump(), settings=wandb.Settings(_disable_stats=True))  # type: ignore
+        wandb.init(project=config.project_name, name=config.run_name, config=config.model_dump(), settings=wandb.Settings(_disable_stats=False))  # type: ignore
         wandb.log({"num_params": sum(x.numel() for x in train_state.model.parameters())}, step=0)
         save_code_and_config(config)
     if config.ema:

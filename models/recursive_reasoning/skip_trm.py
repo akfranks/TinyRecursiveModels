@@ -21,10 +21,10 @@ class TinyRecursiveReasoningModel_ACTV1InnerCarry:
 @dataclass
 class TinyRecursiveReasoningModel_ACTV1Carry:
     inner_carry: TinyRecursiveReasoningModel_ACTV1InnerCarry
-    
+
     steps: torch.Tensor
     halted: torch.Tensor
-    
+
     current_data: Dict[str, torch.Tensor]
 
 
@@ -37,7 +37,7 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
 
     H_cycles: int
 
-    skips: list[int]
+    skips: List[int]
 
     H_layers: int # ignored
     L_layers: int
@@ -50,7 +50,7 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
 
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10000.0
-    
+
     # Halting Q-learning config
     halt_max_steps: int
     halt_exploration_prob: float
@@ -145,11 +145,11 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             self.embed_pos = CastedEmbedding(self.config.seq_len + self.puzzle_emb_len, self.config.hidden_size, init_std=embed_init_std, cast_to=self.forward_dtype)
         else:
             pass
-        
+
         # Skip Weights
         self.skips = self.config.skips
         self.skip_weights = torch.nn.ParameterDict({
-            f'w_{skip}': torch.nn.Parameter(torch.randn(self.config.hidden_size, self.config.hidden_size)) 
+            f'w_{skip}': torch.nn.Parameter(torch.randn(self.config.hidden_size, self.config.hidden_size, dtype=self.forward_dtype))  # bfloat16
             for skip in self.skips
         })
         self.max_skip = max(self.skips)
@@ -173,7 +173,7 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # Puzzle embeddings
         if self.config.puzzle_emb_ndim > 0:
             puzzle_embedding = self.puzzle_emb(puzzle_identifiers)
-            
+
             pad_count = self.puzzle_emb_len * self.config.hidden_size - puzzle_embedding.shape[-1]
             if pad_count > 0:
                 puzzle_embedding = F.pad(puzzle_embedding, (0, pad_count))
@@ -197,10 +197,11 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         return TinyRecursiveReasoningModel_ACTV1InnerCarry(
             zs=init_buffer,
         )
-        
+
     def reset_carry(self, reset_flag: torch.Tensor, carry: TinyRecursiveReasoningModel_ACTV1InnerCarry):
         return TinyRecursiveReasoningModel_ACTV1InnerCarry(
-            zs=torch.where(reset_flag.view(-1, 1, 1, 1), self.L_init, carry.zs),
+            # zs=torch.where(reset_flag.view(-1, 1, 1, 1), self.L_init, carry.zs),
+            zs=torch.where(reset_flag.view(-1, 1, 1, 1), self.L_init.view(1, 1, -1, 1), carry.zs)
         )
 
     def forward(self, carry: TinyRecursiveReasoningModel_ACTV1InnerCarry, batch: Dict[str, torch.Tensor]) -> Tuple[TinyRecursiveReasoningModel_ACTV1InnerCarry, torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
@@ -231,24 +232,25 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
                     current_zs[..., (t - 1) % self.max_skip] = z # no grad, so in-place is fine
 
         # Final H cycle
-        current_zs = current_zs.detach()
+        current_zs_clone = current_zs.detach().clone()
         for t in range(1, self.max_skip+1):
             # Add skip connections first
             skip_sum = z
             for skip in self.skips:
                 if t >= skip:
                     buffer_idx = (t - skip - 1) % self.max_skip
-                    skip_h = current_zs[..., buffer_idx]  # Reads freshly computed values from this iteration
-                    skip_sum = skip_sum + torch.matmul(skip_h, self.skip_weights[f'w_{skip}'])
+                    skip_z = current_zs_clone[..., buffer_idx]  # Reads freshly computed values from this iteration
+                    skip_sum = skip_sum + torch.matmul(skip_z, self.skip_weights[f'w_{skip}'])
             # Then process through L_level
             z = self.L_level(skip_sum, input_embeddings, **seq_info)
             # Update buffer with new z (has gradients within this cycle)
-            current_zs[..., (t - 1) % self.max_skip] = z
+            current_zs_clone = current_zs_clone.clone()  # Clone to avoid in-place issues
+            current_zs_clone[..., (t - 1) % self.max_skip] = z
 
         # LM Outputs
-        new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(zs=current_zs.detach())  # Detach for carry
-        output = self.lm_head(current_zs[:, self.puzzle_emb_len:, :, -1])  # Use current_zs (with gradients) for outputs
-        q_logits = self.q_head(current_zs[:, 0, :, -1]).to(torch.float32)  # Q-head; uses the first puzzle_emb position
+        new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(zs=current_zs_clone.detach())  # Detach for carry
+        output = self.lm_head(current_zs_clone[:, self.puzzle_emb_len:, :, -1])  # Use last z (with grad) for outputs
+        q_logits = self.q_head(current_zs_clone[:, 0, :, -1]).to(torch.float32)  # Q-head; uses the first puzzle_emb position
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
 
@@ -269,18 +271,18 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
 
         return TinyRecursiveReasoningModel_ACTV1Carry(
             inner_carry=self.inner.empty_carry(batch_size),  # Empty is expected, it will be reseted in first pass as all sequences are halted.
-            
+
             steps=torch.zeros((batch_size, ), dtype=torch.int32),
             halted=torch.ones((batch_size, ), dtype=torch.bool),  # Default to halted
-            
+
             current_data={k: torch.empty_like(v) for k, v in batch.items()}
         )
-        
+
     def forward(self, carry: TinyRecursiveReasoningModel_ACTV1Carry, batch: Dict[str, torch.Tensor]) -> Tuple[TinyRecursiveReasoningModel_ACTV1Carry, Dict[str, torch.Tensor]]:
 
         # Update data, carry (removing halted sequences)
         new_inner_carry = self.inner.reset_carry(carry.halted, carry.inner_carry)
-        
+
         new_steps = torch.where(carry.halted, 0, carry.steps)
 
         new_current_data = {k: torch.where(carry.halted.view((-1, ) + (1, ) * (batch[k].ndim - 1)), batch[k], v) for k, v in carry.current_data.items()}
@@ -298,7 +300,7 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
             # Step
             new_steps = new_steps + 1
             is_last_step = new_steps >= self.config.halt_max_steps
-            
+
             halted = is_last_step
 
             # if training, and ACT is enabled
@@ -306,7 +308,7 @@ class TinyRecursiveReasoningModel_ACTV1(nn.Module):
 
                 # Halt signal
                 # NOTE: During evaluation, always use max steps, this is to guarantee the same halting steps inside a batch for batching purposes
-                
+
                 if self.config.no_ACT_continue:
                     halted = halted | (q_halt_logits > 0)
                 else:
