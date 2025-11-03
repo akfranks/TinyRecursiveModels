@@ -219,38 +219,37 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # H - 1 skip "cycles" without grad (truncate BPTT)
         with torch.no_grad():
             for _H_step in range(self.config.H_cycles-1):
-                for t in range(1, self.max_skip+1):
+                for t in range(self.max_skip):
                     # Add skip connections first
                     skip_sum = z
                     for skip in self.skips:
-                        if t >= skip:
-                            buffer_idx = (t - skip - 1) % self.max_skip
+                        if t >= skip - 1:
+                            buffer_idx = t - skip
                             skip_h = current_zs[..., buffer_idx]
                             skip_sum = skip_sum + torch.matmul(skip_h, self.skip_weights[f'w_{skip}'])
                     # Then process through L_level
                     z = self.L_level(skip_sum, input_embeddings, **seq_info)
-                    current_zs[..., (t - 1) % self.max_skip] = z # no grad, so in-place is fine
+                    current_zs[..., t] = z # no grad, so in-place is fine
 
         # Final H cycle
-        current_zs_clone = current_zs.detach().clone()
-        for t in range(1, self.max_skip+1):
+        final_zs = [current_zs[..., i].detach().clone() for i in range(self.max_skip)]  # Clone to avoid in-place issues
+        for t in range(self.max_skip):
             # Add skip connections first
             skip_sum = z
             for skip in self.skips:
-                if t >= skip:
-                    buffer_idx = (t - skip - 1) % self.max_skip
-                    skip_z = current_zs_clone[..., buffer_idx]  # Reads freshly computed values from this iteration
+                if t >= skip - 1:
+                    buffer_idx = t - skip
+                    skip_z = final_zs[buffer_idx]  # Reads freshly computed values from this iteration
                     skip_sum = skip_sum + torch.matmul(skip_z, self.skip_weights[f'w_{skip}'])
             # Then process through L_level
             z = self.L_level(skip_sum, input_embeddings, **seq_info)
-            # Update buffer with new z (has gradients within this cycle)
-            current_zs_clone = current_zs_clone.clone()  # Clone to avoid in-place issues
-            current_zs_clone[..., (t - 1) % self.max_skip] = z
+            final_zs[t] = z
 
         # LM Outputs
-        new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(zs=current_zs_clone.detach())  # Detach for carry
-        output = self.lm_head(current_zs_clone[:, self.puzzle_emb_len:, :, -1])  # Use last z (with grad) for outputs
-        q_logits = self.q_head(current_zs_clone[:, 0, :, -1]).to(torch.float32)  # Q-head; uses the first puzzle_emb position
+        final_zs = torch.stack(final_zs, dim=-1)  # B, L, D, max_skip
+        new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(zs=final_zs.detach())  # Detach for carry
+        output = self.lm_head(final_zs[:, self.puzzle_emb_len:, :, -1])  # Use last z (with grad) for outputs
+        q_logits = self.q_head(final_zs[:, 0, :, -1]).to(torch.float32)  # Q-head; uses the first puzzle_emb position
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
 
