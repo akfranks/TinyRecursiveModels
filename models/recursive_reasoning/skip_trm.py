@@ -1,14 +1,12 @@
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict
 from dataclasses import dataclass
 import math
 import torch
-import copy
 import torch.nn.functional as F
 from torch import nn
 from pydantic import BaseModel
-import random
 from models.common import trunc_normal_init_
-from models.layers import rms_norm, LinearSwish, SwiGLU, Attention, RotaryEmbedding, CosSin, CastedEmbedding, CastedLinear
+from models.layers import rms_norm, SwiGLU, Attention, RotaryEmbedding, CosSin, CastedEmbedding, CastedLinear
 from models.sparse_embedding import CastedSparseEmbedding
 
 IGNORE_LABEL_ID = -100
@@ -61,7 +59,14 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     mlp_t: bool = False # use mlp on L instead of transformer
     puzzle_emb_len: int = 16 # if non-zero, its specified to this value
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
+    
+    # Added for skip TRM
     output_layers: int = 0 # number of transformer blocks to apply before LM head (0 = direct to LM head)
+    
+    # whether skip connections are sliding in time or fixed.
+    # Sliding: z_t = f({z_{t-skip}})
+    # Fixed: z_t = f(z_{floor(t/skip)})
+    sliding_skips: bool = True
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -228,10 +233,8 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
                     # Add skip connections first
                     skip_sum = z
                     for skip in self.skips:
-                        if t >= skip - 1:
-                            buffer_idx = t - skip
-                            skip_h = current_zs[..., buffer_idx]
-                            skip_sum = skip_sum + torch.matmul(skip_h, self.skip_weights[f'w_{skip}'])
+                        skip_h = current_zs[..., t - skip]
+                        skip_sum = skip_sum + torch.matmul(skip_h, self.skip_weights[f'w_{skip}'])
                     # Then process through L_level
                     z = self.L_level(skip_sum, input_embeddings, **seq_info)
                     current_zs[..., t] = z # no grad, so in-place is fine
@@ -242,10 +245,8 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             # Add skip connections first
             skip_sum = z
             for skip in self.skips:
-                if t >= skip - 1:
-                    buffer_idx = t - skip
-                    skip_z = final_zs[buffer_idx]  # Reads freshly computed values from this iteration
-                    skip_sum = skip_sum + torch.matmul(skip_z, self.skip_weights[f'w_{skip}'])
+                skip_z = final_zs[t - skip]  # Reads freshly computed values from this iteration
+                skip_sum = skip_sum + torch.matmul(skip_z, self.skip_weights[f'w_{skip}'])
             # Then process through L_level
             z = self.L_level(skip_sum, input_embeddings, **seq_info)
             final_zs[t] = z
