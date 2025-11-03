@@ -61,6 +61,7 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     mlp_t: bool = False # use mlp on L instead of transformer
     puzzle_emb_len: int = 16 # if non-zero, its specified to this value
     no_ACT_continue: bool =  True # No continue ACT loss, only use the sigmoid of the halt which makes much more sense
+    output_layers: int = 0 # number of transformer blocks to apply before LM head (0 = direct to LM head)
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
     def __init__(self, config: TinyRecursiveReasoningModel_ACTV1Config) -> None:
@@ -157,6 +158,10 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # Reasoning Layers
         self.L_level = TinyRecursiveReasoningModel_ACTV1ReasoningModule(layers=[TinyRecursiveReasoningModel_ACTV1Block(self.config) for _i in range(self.config.L_layers)])
 
+        # Output Layers
+        if self.config.output_layers > 0:
+            self.output_blocks = torch.nn.ModuleList([TinyRecursiveReasoningModel_ACTV1Block(self.config) for _i in range(self.config.output_layers)])
+
         # Initial states
         self.L_init = nn.Buffer(trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1), persistent=True)
 
@@ -248,7 +253,17 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
         # LM Outputs
         final_zs = torch.stack(final_zs, dim=-1)  # B, L, D, max_skip
         new_carry = TinyRecursiveReasoningModel_ACTV1InnerCarry(zs=final_zs.detach())  # Detach for carry
-        output = self.lm_head(final_zs[:, self.puzzle_emb_len:, :, -1])  # Use last z (with grad) for outputs
+
+        # Get final hidden states for output
+        output_hidden = final_zs[..., -1]  # B, L, D
+
+        # Optionally pass through output transformer blocks
+        if self.config.output_layers > 0:
+            for block in self.output_blocks:
+                output_hidden = block(cos_sin=seq_info['cos_sin'], hidden_states=output_hidden)
+
+        # Remove puzzle embeddings and pass to LM head
+        output = self.lm_head(output_hidden[:, self.puzzle_emb_len:, :])
         q_logits = self.q_head(final_zs[:, 0, :, -1]).to(torch.float32)  # Q-head; uses the first puzzle_emb position
         return new_carry, output, (q_logits[..., 0], q_logits[..., 1])
 
