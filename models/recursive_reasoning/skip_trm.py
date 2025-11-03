@@ -65,7 +65,7 @@ class TinyRecursiveReasoningModel_ACTV1Config(BaseModel):
     
     # whether skip connections are sliding in time or fixed.
     # Sliding: z_t = f({z_{t-skip}})
-    # Fixed: z_t = f(z_{floor(t/skip)})
+    # Fixed: z_t = f(z_{(t//skip)*skip})
     sliding_skips: bool = True
 
 class TinyRecursiveReasoningModel_ACTV1Block(nn.Module):
@@ -233,7 +233,10 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
                     # Add skip connections first
                     skip_sum = z
                     for skip in self.skips:
-                        skip_h = current_zs[..., t - skip]
+                        if self.config.sliding_skips:
+                            skip_h = current_zs[..., t - skip]
+                        else:
+                            skip_h = current_zs[..., (t // skip)*skip]
                         skip_sum = skip_sum + torch.matmul(skip_h, self.skip_weights[f'w_{skip}'])
                     # Then process through L_level
                     z = self.L_level(skip_sum, input_embeddings, **seq_info)
@@ -245,7 +248,10 @@ class TinyRecursiveReasoningModel_ACTV1_Inner(nn.Module):
             # Add skip connections first
             skip_sum = z
             for skip in self.skips:
-                skip_z = final_zs[t - skip]  # Reads freshly computed values from this iteration
+                if self.config.sliding_skips:
+                    skip_z = final_zs[t - skip]  # Reads freshly computed values from this iteration
+                else:
+                    skip_z = final_zs[(t // skip)*skip]
                 skip_sum = skip_sum + torch.matmul(skip_z, self.skip_weights[f'w_{skip}'])
             # Then process through L_level
             z = self.L_level(skip_sum, input_embeddings, **seq_info)
