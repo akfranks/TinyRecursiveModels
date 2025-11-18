@@ -18,6 +18,11 @@
 # You need to submit the job 5 times total to complete all 50000 epochs.
 # Each time it will resume from the checkpoint.
 
+# Load conda
+module load miniforge
+source ~/.bashrc
+conda activate skiptrm
+
 # Parse command line arguments
 TOTAL_EPOCHS=${1:-50000}
 EPOCHS_PER_RUN=${2:-10000}
