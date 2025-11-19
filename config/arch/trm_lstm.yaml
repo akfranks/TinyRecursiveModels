@@ -1,0 +1,28 @@
+name: recursive_reasoning.trm_lstm@LSTMTRM
+loss:
+  name: losses@ACTLossHead
+  loss_type: stablemax_cross_entropy
+
+# Halting parameters
+halt_exploration_prob: 0.1
+halt_max_steps: 16
+
+# Recursion parameters
+# T_cycles: number of full recursions (like H_cycles in TRM)
+# n_cycles: number of h updates per recursion (like L_cycles in TRM)
+T_cycles: 3
+n_cycles: 6
+
+# Network parameters
+hidden_size: 512
+expansion: 4
+
+# Puzzle embedding
+puzzle_emb_ndim: ${.hidden_size}
+puzzle_emb_len: 16
+
+# Forward dtype
+forward_dtype: bfloat16
+
+# ACT configuration
+no_ACT_continue: True  # No continue ACT loss, only use halt probability
